@@ -1,0 +1,4 @@
+parameters:
+    level: 3
+    paths:
+        - ./src  # Spécifiez le dossier à analyser (remplacez "src" par le dossier où se trouvent vos fichiers PHP)

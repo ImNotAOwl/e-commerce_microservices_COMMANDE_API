@@ -1,0 +1,77 @@
+version: '3.4'
+
+services:
+    php:
+        build:
+            context: ./php
+            args:
+                PHP_VERSION: $PHP_VERSION
+        container_name: $PHP_CONTAINER_NAME
+        env_file:
+            - .env
+        environment:
+            XDEBUG_MODE: coverage
+            COMPOSER_VERSION: $COMPOSER_VERSION
+            NODE_VERSION: $NODE_VERSION
+        volumes:
+            - ./bash_completion:/etc/bash_completion.d
+            - ..:$CONTAINER_PROJECT_PATH:rw
+            - ./custom-fpm.ini:/etc/php/$PHP_VERSION/fpm/conf.d/custom-fpm.ini
+        working_dir: $CONTAINER_PROJECT_PATH
+        extra_hosts:
+            - 'host.docker.internal:host-gateway'
+
+    apache:
+        image: registry-gitlab.eolas.fr/indus/docker/images/apache
+        container_name: $APACHE_CONTAINER_NAME
+        env_file:
+            - .env
+        ports:
+            - '80:80'
+        volumes:
+            - ./config/vhosts:/etc/apache2/sites-enabled
+            - ../public:$CONTAINER_PROJECT_PATH/public:ro
+        depends_on:
+            - php
+
+    db:
+        image: mariadb:${DATABASE_VERSION}
+        container_name: $DATABASE_CONTAINER_NAME
+        env_file:
+            - .env
+        environment:
+            MYSQL_DATABASE: $DATABASE_NAME
+            MYSQL_ROOT_PASSWORD: $DATABASE_ROOT_PASSWORD
+            MYSQL_USER: $DATABASE_USER
+            MYSQL_PASSWORD: $DATABASE_PASSWORD
+        volumes:
+            - ./var/mysql/data:/var/lib/mysql
+
+    phpmyadmin:
+        image: phpmyadmin/phpmyadmin
+        container_name: $PHPMYADMIN_CONTAINER_NAME
+        env_file:
+            - .env
+        environment:
+            PMA_HOST: $DATABASE_CONTAINER_NAME
+            PMA_PORT: $DATABASE_PORT
+            PMA_USER: $DATABASE_USER
+            PMA_PASSWORD: $DATABASE_PASSWORD
+            UPLOAD_LIMIT: 300M
+        depends_on:
+            - db
+
+    rabbitmq:
+        image: rabbitmq:3-management
+        container_name: $RABBITMQ_CONTAINER_NAME
+        env_file:
+            - .env
+        ports:
+            - "5672:5672"
+            - "15672:15672"
+        environment:
+            RABBITMQ_DEFAULT_USER: $RABBITMQ_USER
+            RABBITMQ_DEFAULT_PASS: $RABBITMQ_PASSWORD
+        volumes:
+            - ./var/rabbitmq/data:/var/lib/rabbitmq
+            - ./var/rabbitmq/log/:/var/log/rabbitmq

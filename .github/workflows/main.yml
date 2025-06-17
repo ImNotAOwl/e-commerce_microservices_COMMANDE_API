@@ -1,0 +1,201 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build_and_tests:
+    runs-on: ubuntu-latest
+
+    env:
+      NODE_ENV: production
+      COMMANDE_PORT: 3000
+      COMMANDE_DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      COMMANDE_USER: ${{ secrets.COMMANDE_USER }}
+      COMMANDE_PASS: ${{ secrets.COMMANDE_PASS }}
+      DB_SERVICE: commande
+      RABBITMQ_PROTOCOL: amqp
+      RABBITMQ_USER: ${{ secrets.RABBITMQ_USER }}
+      RABBITMQ_PASSWORD: ${{ secrets.RABBITMQ_PASSWORD }}
+      RABBITMQ_HOST: ${{ secrets.RABBITMQ_HOST }}
+      RABBITMQ_PORT: 5672
+      RABBITMQ_VHOST: /
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
+      SONAR_HOST_URL: https://sonarcloud.io
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: mbstring, intl, opcache
+          coverage: xdebug
+
+      - name: Install dependencies
+        run: |
+          composer install --no-interaction --prefer-dist --no-scripts
+
+      - name: Create coverage directory
+        run: |
+          mkdir -p var/coverage
+
+      - name: Run PHPUnit tests with coverage
+        run: |
+          ./vendor/bin/phpunit --coverage-clover=var/coverage/clover.xml
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: var/coverage/clover.xml
+
+      - name: Debug coverage file
+        run: ls -lah var/coverage && cat var/coverage/clover.xml
+
+      - name: Run PHPStan
+        run: |
+          vendor/bin/phpstan analyse
+
+      - name: Run PHP-CS-Fixer
+        run: |
+          vendor/bin/php-cs-fixer fix --dry-run --diff
+
+  sonarqube:
+    needs: build_and_tests
+    runs-on: ubuntu-latest
+
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
+      SONAR_HOST_URL: https://sonarcloud.io
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@v4
+        with:
+          args: >
+            -Dsonar.projectKey=${{ secrets.SONAR_PROJECT_KEY }}
+            -Dsonar.organization=${{ secrets.SONAR_ORGANIZATION }}
+            -Dsonar.tests=tests
+            -Dsonar.php.coverage.reportPaths=var/coverage/clover.xml
+            -Dsonar.exclusions=node_modules/**,dist/**,**/openapi.yaml,coverage/**,**/*Test.php
+
+#             - name: Wait for SonarQube Quality Gate
+#               uses: SonarSource/sonarqube-quality-gate-action@v1
+#               with:
+#                 pollingTimeoutSec: 600
+#
+#             - name: "Example show SonarQube Quality Gate Status value"
+#               run: echo "The Quality Gate status is ${{ steps.sonarqube-quality-gate-check.outputs.quality-gate-status }}"
+
+  push_to_registries:
+    needs: sonarqube
+    name: Push Docker image to GHCR.io
+    runs-on: ubuntu-latest
+
+    env:
+      NODE_ENV: production
+      COMMANDE_PORT: 3000
+      COMMANDE_DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      LOGS_PATH: ${PWD}
+      COMMANDE_USER: ${{ secrets.COMMANDE_USER }}
+      COMMANDE_PASS: ${{ secrets.COMMANDE_PASS }}
+      DB_SERVICE: commande
+      RABBITMQ_PROTOCOL: amqp
+      RABBITMQ_USER: ${{ secrets.RABBITMQ_USER }}
+      RABBITMQ_PASSWORD: ${{ secrets.RABBITMQ_PASSWORD }}
+      RABBITMQ_HOST: ${{ secrets.RABBITMQ_HOST }}
+      RABBITMQ_PORT: 5672
+      RABBITMQ_VHOST: /
+
+    permissions:
+      packages: write
+      contents: read
+      attestations: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Convert repository name to lowercase
+        id: convert_repo
+        run: echo "::set-output name=lowercase_repo::$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')"
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get latest Docker tag
+        id: get_tag
+        run: |
+          owner=${{ github.repository_owner }}
+          repo=${{ github.event.repository.name }}
+          package_name=commande_api%2Fcommande_service
+
+          # Récupération des tags (on gère plusieurs pages avec 'per_page=100')
+          tags=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          "https://api.github.com/orgs/$owner/packages/container/$package_name/versions?per_page=100" | \
+          jq -r '.[].metadata.container.tags[]' | \
+          grep -E '^[0-9]+\.[0-9]+$' || echo "0.0")
+
+          # Trier et obtenir le dernier tag (si aucun tag, on commence à 0.0)
+          latest_tag=$(echo "$tags" | sort -V | tail -n 1)
+          echo "Latest tag: $latest_tag"
+          echo "::set-output name=latest_tag::$latest_tag"
+
+      - name: Increment tag
+        id: increment_tag
+        run: |
+          latest_tag=${{ steps.get_tag.outputs.latest_tag }}
+          IFS='.' read -r -a array <<< "$latest_tag"
+          major=${array[0]}
+          minor=${array[1]}
+          new_minor=$((minor + 1))
+          new_tag="$major.$new_minor"
+          echo "New tag: $new_tag"
+          echo "::set-output name=new_tag::$new_tag"
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ghcr.io/${{ steps.convert_repo.outputs.lowercase_repo }}/commande_service
+            ghcr.io/${{ steps.convert_repo.outputs.lowercase_repo }}/commande_service:latest
+
+      - name: Build and push Docker images
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ steps.convert_repo.outputs.lowercase_repo }}/commande_service:${{ steps.increment_tag.outputs.new_tag }}
+            ghcr.io/${{ steps.convert_repo.outputs.lowercase_repo }}/commande_service:latest
+          labels: ${{ steps.meta.outputs.labels }}
+          network: host
+
+      - name: Trigger Deployment Pipeline
+        run: |
+          owner=${{ github.repository_owner }}
+          curl -X POST \
+          -H "Accept: application/vnd.github.everest-preview+json" \
+          -H "Authorization: Bearer ${{ secrets.DEPLOY_GH_PAT }}" \
+          https://api.github.com/repos/$owner/DEPLOYMENT/dispatches \
+          -d '{"event_type": "deploy_apis", "client_payload": {"service_name": "bs_commande-api"}}'

@@ -1,0 +1,102 @@
+name: CI Pipeline
+
+on:
+  pull_request:
+    branches:
+      - main
+      - develop
+
+jobs:
+  build_and_tests:
+    runs-on: ubuntu-latest
+
+    env:
+      NODE_ENV: production
+      COMMANDE_PORT: 3000
+      COMMANDE_DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      COMMANDE_USER: ${{ secrets.COMMANDE_USER }}
+      COMMANDE_PASS: ${{ secrets.COMMANDE_PASS }}
+      DB_SERVICE: commande
+      RABBITMQ_PROTOCOL: amqp
+      RABBITMQ_USER: ${{ secrets.RABBITMQ_USER }}
+      RABBITMQ_PASSWORD: ${{ secrets.RABBITMQ_PASSWORD }}
+      RABBITMQ_HOST: ${{ secrets.RABBITMQ_HOST }}
+      RABBITMQ_PORT: 5672
+      RABBITMQ_VHOST: /
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
+      SONAR_HOST_URL: https://sonarcloud.io
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: mbstring, intl, opcache
+          coverage: xdebug
+
+      - name: Install dependencies
+        run: |
+          composer install --no-interaction --prefer-dist --no-scripts
+
+      - name: Create coverage directory
+        run: |
+          mkdir -p var/coverage
+
+      - name: Run PHPUnit tests with coverage
+        run: |
+          ./vendor/bin/phpunit --coverage-clover=var/coverage/clover.xml
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: var/coverage/clover.xml
+
+      - name: Debug coverage file
+        run: ls -lah var/coverage && cat var/coverage/clover.xml
+
+      - name: Run PHPStan
+        run: |
+          vendor/bin/phpstan analyse
+
+      - name: Run PHP-CS-Fixer
+        run: |
+          vendor/bin/php-cs-fixer fix --dry-run --diff
+
+  sonarqube:
+    needs: build_and_tests
+    runs-on: ubuntu-latest
+
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
+      SONAR_HOST_URL: https://sonarcloud.io
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@v4
+        with:
+          args: >
+            -Dsonar.projectKey=${{ secrets.SONAR_PROJECT_KEY }}
+            -Dsonar.organization=${{ secrets.SONAR_ORGANIZATION }}
+            -Dsonar.tests=tests
+            -Dsonar.php.coverage.reportPaths=var/coverage/clover.xml
+            -Dsonar.exclusions=node_modules/**,dist/**,**/openapi.yaml,coverage/**,**/*Test.php
+
+#             - name: Wait for SonarQube Quality Gate
+#               uses: SonarSource/sonarqube-quality-gate-action@v1
+#               with:
+#                 pollingTimeoutSec: 600
+#
+#             - name: "Example show SonarQube Quality Gate Status value"
+#               run: echo "The Quality Gate status is ${{ steps.sonarqube-quality-gate-check.outputs.quality-gate-status }}"

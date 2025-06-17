@@ -1,0 +1,31 @@
+monolog:
+    handlers:
+        main:
+            type: stream
+            path: '%kernel.logs_dir%/%kernel.environment%.log'
+            level: debug
+            channels: ["!event"]
+            buffer_size: 50
+
+        console:
+            type: console
+            process_psr_3_messages: true
+            channels:  ["!event", "!doctrine", "!console"]
+
+when@prod:
+    monolog:
+        handlers:
+            main:
+                type: stream
+                path: "%kernel.logs_dir%/prod.log"
+                level: info
+                buffer_size: 50
+
+            critical:
+                type: stream
+                path: "%kernel.logs_dir%/critical.log"
+                level: critical
+
+            console:
+                type: console
+                channels: ["!event", "!doctrine"]
